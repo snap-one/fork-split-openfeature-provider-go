@@ -1,451 +1,671 @@
-package split_openfeature_provider_go
+package split_openfeature_provider_go_test
 
 import (
-	"github.com/open-feature/go-sdk/pkg/openfeature"
-	"github.com/splitio/go-client/splitio/client"
-	"github.com/splitio/go-client/splitio/conf"
-	"github.com/splitio/go-toolkit/logging"
-	"reflect"
-	"strings"
-	"testing"
+	"context"
+	"fmt"
+	"github.com/google/uuid"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/open-feature/go-sdk/openfeature"
+	. "github.com/splitio/split-openfeature-provider-go"
+	"github.com/splitio/split-openfeature-provider-go/mocks"
+	"go.uber.org/mock/gomock"
 )
 
-func create(t *testing.T) *openfeature.Client {
-	cfg := conf.Default()
-	cfg.SplitFile = "./split.yaml"
-	cfg.LoggerConfig.LogLevel = logging.LevelNone
-	factory, err := client.NewSplitFactory("localhost", cfg)
-	if err != nil {
-		// error
-		t.Error("Error creating split factory")
-	}
-	splitClient := factory.Client()
-	err = splitClient.BlockUntilReady(10)
-	if err != nil {
-		// error timeout
-		t.Error("Split sdk timeout error")
-	}
-	provider, err := NewProvider(*splitClient)
-	if err != nil {
-		t.Error(err)
-	}
-	if provider == nil {
-		t.Error("Error creating Split Provider")
-	}
-	openfeature.SetProvider(provider)
-	return openfeature.NewClient("test_client")
-}
+var _ = Describe("Provider", func() {
+	var (
+		mockSplitClient *mocks.MockSplitClient
+		subject         *SplitProvider
+	)
 
-func evaluationContext() openfeature.EvaluationContext {
-	return openfeature.NewEvaluationContext("key", nil)
-}
+	BeforeEach(func() {
+		mockCtrl := gomock.NewController(GinkgoT())
+		mockSplitClient = mocks.NewMockSplitClient(mockCtrl)
+		var err error
+		subject, err = NewProvider(mockSplitClient)
+		Ω(err).ShouldNot(HaveOccurred())
+	})
 
-func TestCreateSimple(t *testing.T) {
-	provider, err := NewProviderSimple("localhost")
-	if err != nil {
-		t.Error(err)
-	}
-	if provider == nil {
-		t.Error("Error creating Split Provider")
-	}
-}
+	Describe("Metadata", func() {
+		It("should return the correct metadata", func() {
+			Ω(subject.Metadata().Name).Should(Equal("Split"))
+		})
+	})
 
-func TestUseDefault(t *testing.T) {
-	ofClient := create(t)
-	flagName := "random-non-existent-feature"
-	evalCtx := evaluationContext()
+	Describe("Hooks", func() {
+		It("returns an empty list of hooks", func() {
+			Ω(subject.Hooks()).Should(BeEmpty())
+		})
+	})
 
-	result, err := ofClient.BooleanValue(nil, flagName, false, evalCtx)
-	if err == nil {
-		t.Error("Should have returned flag not found error")
-	} else if !strings.Contains(err.Error(), string(openfeature.FlagNotFoundCode)) {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result == true {
-		t.Error("Result was true, but should have been default value of false")
-	}
-	result, err = ofClient.BooleanValue(nil, flagName, true, evalCtx)
-	if err == nil {
-		t.Error("Should have returned flag not found error")
-	} else if !strings.Contains(err.Error(), string(openfeature.FlagNotFoundCode)) {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result == false {
-		t.Error("Result was false, but should have been default value of true")
-	}
-}
+	Describe("BooleanEvaluation", func() {
+		It("should return the default value and error if no targeting key", func() {
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				"foo": uuid.NewString(),
+			}
 
-func TestMissingTargetingKey(t *testing.T) {
-	ofClient := create(t)
-	flagName := "random-non-existent-feature"
+			// act
+			result := subject.BooleanEvaluation(context.Background(), feature, true, evalCtx)
 
-	result, err := ofClient.BooleanValue(nil, flagName, false, openfeature.EvaluationContext{})
-	if err == nil {
-		t.Error("Should have returned targeting key missing error")
-	} else if !strings.Contains(err.Error(), string(openfeature.TargetingKeyMissingCode)) {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result == true {
-		t.Error("Result was true, but should have been default value of false")
-	}
-}
+			Ω(result.Value).Should(BeTrue())
+			Ω(result.ProviderResolutionDetail).Should(Equal(openfeature.ProviderResolutionDetail{
+				ResolutionError: openfeature.NewTargetingKeyMissingResolutionError("Targeting key is required and missing."),
+				Reason:          openfeature.ErrorReason,
+				Variant:         "",
+			}))
+		})
 
-func TestGetControlVariantNonExistentSplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "random-non-existent-feature"
-	evalCtx := evaluationContext()
+		DescribeTable("split TARGETING_MATCH response",
+			func(treatment string, expectedValue bool) {
+				key := uuid.NewString()
+				feature := uuid.NewString()
+				evalCtx := openfeature.FlattenedContext{
+					openfeature.TargetingKey: key,
+				}
+				mockSplitClient.EXPECT().
+					Treatment(key, feature, nil).
+					Return(treatment)
 
-	result, err := ofClient.BooleanValueDetails(nil, flagName, false, evalCtx)
-	if err == nil {
-		t.Error("Should have returned flag not found error")
-	} else if !strings.Contains(err.Error(), string(openfeature.FlagNotFoundCode)) {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.Value == true {
-		t.Error("Result was true, but should have been default value of false")
-	} else if result.Variant != "control" {
-		t.Error("Variant should be control due to Split Go SDK functionality")
-	}
-}
+				// act
+				result := subject.BooleanEvaluation(context.Background(), feature, !expectedValue, evalCtx)
 
-func TestGetBooleanSplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "some_other_feature"
-	evalCtx := evaluationContext()
+				Ω(result).Should(Equal(openfeature.BoolResolutionDetail{
+					Value: expectedValue,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						Reason:  openfeature.TargetingMatchReason,
+						Variant: treatment,
+					},
+				}))
+			},
+			Entry("handles true", "true", true),
+			Entry("handles on", "on", true),
+			Entry("handles false", "false", false),
+			Entry("handles off", "off", false),
+		)
 
-	result, err := ofClient.BooleanValue(nil, flagName, true, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result == true {
-		t.Error("Result was true, but should have been false as set in split.yaml")
-	}
-}
+		DescribeTable("split CONTROL response",
+			func(treatment string) {
+				key := uuid.NewString()
+				feature := uuid.NewString()
+				evalCtx := openfeature.FlattenedContext{
+					openfeature.TargetingKey: key,
+				}
+				mockSplitClient.EXPECT().
+					Treatment(key, feature, nil).
+					Return(treatment).Times(2)
 
-func TestGetBooleanWithKeySplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "my_feature"
-	evalCtx := evaluationContext()
+				// act
+				trueDefault := subject.BooleanEvaluation(context.Background(), feature, true, evalCtx)
+				falseDefault := subject.BooleanEvaluation(context.Background(), feature, false, evalCtx)
 
-	result, err := ofClient.BooleanValue(nil, flagName, false, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result == false {
-		t.Error("Result was false, but should have been true as set in split.yaml")
-	}
+				Ω(trueDefault).Should(Equal(openfeature.BoolResolutionDetail{
+					Value: true,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						ResolutionError: openfeature.NewFlagNotFoundResolutionError("Flag not found."),
+						Reason:          openfeature.DefaultReason,
+						Variant:         treatment,
+					},
+				}))
+				Ω(falseDefault).Should(Equal(openfeature.BoolResolutionDetail{
+					Value: false,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						ResolutionError: openfeature.NewFlagNotFoundResolutionError("Flag not found."),
+						Reason:          openfeature.DefaultReason,
+						Variant:         treatment,
+					},
+				}))
+			},
+			Entry("returns default value with empty treatment", ""),
+			Entry("returns default value with control treatment", "control"),
+		)
 
-	evalCtx = openfeature.NewEvaluationContext("randomKey", nil)
-	result, err = ofClient.BooleanValue(nil, flagName, true, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result == true {
-		t.Error("Result was true, but should have been false as set in split.yaml")
-	}
-}
+		It("returns default value and error if the treatment is not a boolean", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			splitResponse := uuid.NewString()
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(splitResponse)
 
-func TestGetStringSplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "some_other_feature"
-	evalCtx := evaluationContext()
+			// act
+			result := subject.BooleanEvaluation(context.Background(), feature, true, evalCtx)
 
-	result, err := ofClient.StringValue(nil, flagName, "on", evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result != "off" {
-		t.Errorf("Result was %s, not off as set in split.yaml", result)
-	}
-}
+			Ω(result).Should(Equal(openfeature.BoolResolutionDetail{
+				Value: true,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					ResolutionError: openfeature.NewParseErrorResolutionError("Error parsing the treatment to the given type."),
+					Reason:          openfeature.ErrorReason,
+					Variant:         splitResponse,
+				},
+			}))
+		})
 
-func TestGetIntegerSplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "int_feature"
-	evalCtx := evaluationContext()
+		It("passes metadata to the split client", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			attributeValue := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+				"foo":                    attributeValue,
+			}
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, map[string]any{
+					"foo": attributeValue,
+				}).
+				Return("off")
 
-	result, err := ofClient.IntValue(nil, flagName, 0, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result != 32 {
-		t.Errorf("Result was %d, not 32 as set in split.yaml", result)
-	}
-}
+			// act
+			result := subject.BooleanEvaluation(context.Background(), feature, true, evalCtx)
 
-func TestGetObjectSplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "obj_feature"
-	evalCtx := evaluationContext()
+			Ω(result).Should(Equal(openfeature.BoolResolutionDetail{
+				Value: false,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: "off",
+				},
+			}))
+		})
+	})
 
-	result, err := ofClient.ObjectValue(nil, flagName, 0, evalCtx)
-	expectedResult := map[string]interface{}{
-		"key": "value",
-	}
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if !reflect.DeepEqual(result, expectedResult) {
-		t.Error("Result was not map from key to value as set in split.yaml")
-	}
-}
+	Describe("StringEvaluation", func() {
+		It("should return the default value and error if no targeting key", func() {
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				"foo": uuid.NewString(),
+			}
+			defaultValue := uuid.NewString()
 
-func TestGetFloatSplit(t *testing.T) {
-	ofClient := create(t)
-	flagName := "int_feature"
-	evalCtx := evaluationContext()
+			// act
+			result := subject.StringEvaluation(context.Background(), feature, defaultValue, evalCtx)
 
-	result, err := ofClient.FloatValue(nil, flagName, 0, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result != float64(32) {
-		t.Errorf("Result was %f, not 32 as set in split.yaml", result)
-	}
-}
+			Ω(result.Value).Should(Equal(defaultValue))
+			Ω(result.ProviderResolutionDetail).Should(Equal(openfeature.ProviderResolutionDetail{
+				ResolutionError: openfeature.NewTargetingKeyMissingResolutionError("Targeting key is required and missing."),
+				Reason:          openfeature.ErrorReason,
+				Variant:         "",
+			}))
+		})
 
-func TestMetadataName(t *testing.T) {
-	ofClient := create(t)
-	if ofClient.Metadata().Name() != "test_client" {
-		t.Error("Client name was not set properly")
-	}
-	if openfeature.ProviderMetadata().Name != "Split" {
-		t.Errorf("Provider metadata name was %s, not Split", openfeature.ProviderMetadata().Name)
-	}
-}
+		It("split TARGETING_MATCH response", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			treatment := uuid.NewString()
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(treatment)
 
-func TestBooleanDetails(t *testing.T) {
-	ofClient := create(t)
-	flagName := "some_other_feature"
-	evalCtx := evaluationContext()
+			// act
+			result := subject.StringEvaluation(context.Background(), feature, "", evalCtx)
 
-	result, err := ofClient.BooleanValueDetails(nil, flagName, true, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.FlagKey != flagName {
-		t.Errorf("Flag name is %s, not %s", result.FlagKey, flagName)
-	} else if !strings.Contains(string(result.Reason), string(openfeature.TargetingMatchReason)) {
-		t.Errorf("reason is %s, not targeting match", result.Reason)
-	} else if result.Value == true {
-		t.Error("Result was true, but should have been false as in split.yaml")
-	} else if result.Variant != "off" {
-		t.Errorf("Variant should be off as in split.yaml, but was %s", result.Variant)
-	} else if result.ErrorCode != "" {
-		t.Errorf("Unexpected error in result %s", result.ErrorCode)
-	}
-}
+			Ω(result).Should(Equal(openfeature.StringResolutionDetail{
+				Value: treatment,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: treatment,
+				},
+			}))
+		})
 
-func TestIntegerDetails(t *testing.T) {
-	ofClient := create(t)
-	flagName := "int_feature"
-	evalCtx := evaluationContext()
+		DescribeTable("split CONTROL response",
+			func(treatment string) {
+				key := uuid.NewString()
+				feature := uuid.NewString()
+				evalCtx := openfeature.FlattenedContext{
+					openfeature.TargetingKey: key,
+				}
+				mockSplitClient.EXPECT().
+					Treatment(key, feature, nil).
+					Return(treatment)
+				defaultValue := uuid.NewString()
 
-	result, err := ofClient.IntValueDetails(nil, flagName, 0, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.FlagKey != flagName {
-		t.Errorf("Flag name is %s, not %s", result.FlagKey, flagName)
-	} else if !strings.Contains(string(result.Reason), string(openfeature.TargetingMatchReason)) {
-		t.Errorf("reason is %s, not targeting match", result.Reason)
-	} else if result.Value != int64(32) {
-		t.Errorf("Result was %d, but should have been 32 as in split.yaml", result.Value)
-	} else if result.Variant != "32" {
-		t.Errorf("Variant should be 32 as in split.yaml, but was %s", result.Variant)
-	} else if result.ErrorCode != "" {
-		t.Errorf("Unexpected error in result %s", result.ErrorCode)
-	}
-}
+				// act
+				result := subject.StringEvaluation(context.Background(), feature, defaultValue, evalCtx)
 
-func TestStringDetails(t *testing.T) {
-	ofClient := create(t)
-	flagName := "some_other_feature"
-	evalCtx := evaluationContext()
+				Ω(result).Should(Equal(openfeature.StringResolutionDetail{
+					Value: defaultValue,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						ResolutionError: openfeature.NewFlagNotFoundResolutionError("Flag not found."),
+						Reason:          openfeature.DefaultReason,
+						Variant:         treatment,
+					},
+				}))
+			},
+			Entry("returns default value with empty treatment", ""),
+			Entry("returns default value with control treatment", "control"),
+		)
 
-	result, err := ofClient.StringValueDetails(nil, flagName, "blah", evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.FlagKey != flagName {
-		t.Errorf("Flag name is %s, not %s", result.FlagKey, flagName)
-	} else if !strings.Contains(string(result.Reason), string(openfeature.TargetingMatchReason)) {
-		t.Errorf("reason is %s, not targeting match", result.Reason)
-	} else if result.Value != "off" {
-		t.Errorf("Result was %s, but should have been off as in split.yaml", result.Value)
-	} else if result.Variant != "off" {
-		t.Errorf("Variant should be off as in split.yaml, but was %s", result.Variant)
-	} else if result.ErrorCode != "" {
-		t.Errorf("Unexpected error in result %s", result.ErrorCode)
-	}
-}
+		It("passes metadata to the split client", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			attributeValue := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+				"foo":                    attributeValue,
+			}
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, map[string]any{
+					"foo": attributeValue,
+				}).
+				Return("bar")
 
-func TestObjectDetails(t *testing.T) {
-	ofClient := create(t)
-	flagName := "obj_feature"
-	evalCtx := evaluationContext()
+			// act
+			result := subject.StringEvaluation(context.Background(), feature, "", evalCtx)
 
-	result, err := ofClient.ObjectValueDetails(nil, flagName, map[string]interface{}{}, evalCtx)
-	expectedResult := map[string]interface{}{
-		"key": "value",
-	}
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.FlagKey != flagName {
-		t.Errorf("Flag name is %s, not %s", result.FlagKey, flagName)
-	} else if !strings.Contains(string(result.Reason), string(openfeature.TargetingMatchReason)) {
-		t.Errorf("reason is %s, not targeting match", result.Reason)
-	} else if !reflect.DeepEqual(result.Value, expectedResult) {
-		t.Error("Result was not map of key->value as in split.yaml")
-	} else if result.Variant != "{\"key\": \"value\"}" {
-		t.Errorf("Variant should be {\"key\": \"value\"} as in split.yaml, but was %s", result.Variant)
-	} else if result.ErrorCode != "" {
-		t.Errorf("Unexpected error in result %s", result.ErrorCode)
-	}
-}
+			Ω(result).Should(Equal(openfeature.StringResolutionDetail{
+				Value: "bar",
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: "bar",
+				},
+			}))
+		})
+	})
 
-func TestFloatDetails(t *testing.T) {
-	ofClient := create(t)
-	flagName := "int_feature"
-	evalCtx := evaluationContext()
+	Describe("FloatEvaluation", func() {
+		It("should return the default value and error if no targeting key", func() {
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				"foo": uuid.NewString(),
+			}
+			const defaultValue = 0.0
 
-	result, err := ofClient.FloatValueDetails(nil, flagName, 0, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.FlagKey != flagName {
-		t.Errorf("Flag name is %s, not %s", result.FlagKey, flagName)
-	} else if !strings.Contains(string(result.Reason), string(openfeature.TargetingMatchReason)) {
-		t.Errorf("reason is %s, not targeting match", result.Reason)
-	} else if result.Value != float64(32) {
-		t.Errorf("Result was %f, but should have been 32 as in split.yaml", result.Value)
-	} else if result.Variant != "32" {
-		t.Errorf("Variant should be 32 as in split.yaml, but was %s", result.Variant)
-	} else if result.ErrorCode != "" {
-		t.Errorf("Unexpected error in result %s", result.ErrorCode)
-	}
+			// act
+			result := subject.FloatEvaluation(context.Background(), feature, defaultValue, evalCtx)
 
-	flagName = "float_feature"
-	result, err = ofClient.FloatValueDetails(nil, flagName, 0, evalCtx)
-	if err != nil {
-		t.Errorf("Unexpected error occurred %s", err.Error())
-	} else if result.Value != 32.5 {
-		t.Errorf("Result was %f, but should have been 32.5 as in split.yaml", result.Value)
-	} else if result.Variant != "32.5" {
-		t.Errorf("Variant should be 32 as in split.yaml, but was %s", result.Variant)
-	} else if result.ErrorCode != "" {
-		t.Errorf("Unexpected error in result %s", result.ErrorCode)
-	}
-}
+			Ω(result.Value).Should(Equal(defaultValue))
+			Ω(result.ProviderResolutionDetail).Should(Equal(openfeature.ProviderResolutionDetail{
+				ResolutionError: openfeature.NewTargetingKeyMissingResolutionError("Targeting key is required and missing."),
+				Reason:          openfeature.ErrorReason,
+				Variant:         "",
+			}))
+		})
 
-func TestBooleanFail(t *testing.T) {
-	// attempt to fetch an object treatment as a boolean. Should result in the default
-	ofClient := create(t)
-	flagName := "obj_feature"
-	evalCtx := evaluationContext()
+		It("split TARGETING_MATCH response", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			const expected = 2.13
+			treatment := fmt.Sprintf("%f", expected)
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(treatment)
 
-	result, err := ofClient.BooleanValue(nil, flagName, false, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if result != false {
-		t.Error("Result was true, but should have been default of false")
-	}
+			// act
+			result := subject.FloatEvaluation(context.Background(), feature, 0, evalCtx)
 
-	resultDetails, err := ofClient.BooleanValueDetails(nil, flagName, false, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if resultDetails.Value != false {
-		t.Error("Result was true, but should have been default of false")
-	} else if resultDetails.ErrorCode != openfeature.ParseErrorCode {
-		t.Errorf("Expected parse error code, got %s", resultDetails.ErrorCode)
-	} else if resultDetails.Reason != openfeature.ErrorReason {
-		t.Errorf("Expected error reason code, got %s", resultDetails.Reason)
-	} else if resultDetails.Variant != "{\"key\": \"value\"}" {
-		t.Errorf("Expected variant to be string of map, got %s", resultDetails.Variant)
-	}
-}
+			Ω(result).Should(Equal(openfeature.FloatResolutionDetail{
+				Value: expected,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: treatment,
+				},
+			}))
+		})
 
-func TestIntegerFail(t *testing.T) {
-	// attempt to fetch an object treatment as an integer. Should result in the default
-	ofClient := create(t)
-	flagName := "obj_feature"
-	evalCtx := evaluationContext()
+		DescribeTable("split CONTROL response",
+			func(treatment string) {
+				key := uuid.NewString()
+				feature := uuid.NewString()
+				evalCtx := openfeature.FlattenedContext{
+					openfeature.TargetingKey: key,
+				}
+				mockSplitClient.EXPECT().
+					Treatment(key, feature, nil).
+					Return(treatment)
+				const defaultValue = 5.1
 
-	result, err := ofClient.IntValue(nil, flagName, 10, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if result != int64(10) {
-		t.Errorf("Result was %d, but should have been default of 10", result)
-	}
+				// act
+				result := subject.FloatEvaluation(context.Background(), feature, defaultValue, evalCtx)
 
-	resultDetails, err := ofClient.IntValueDetails(nil, flagName, 10, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if resultDetails.Value != int64(10) {
-		t.Errorf("Result was %d, but should have been default of 10", resultDetails.Value)
-	} else if resultDetails.ErrorCode != openfeature.ParseErrorCode {
-		t.Errorf("Expected parse error code, got %s", resultDetails.ErrorCode)
-	} else if resultDetails.Reason != openfeature.ErrorReason {
-		t.Errorf("Expected error reason code, got %s", resultDetails.Reason)
-	} else if resultDetails.Variant != "{\"key\": \"value\"}" {
-		t.Errorf("Expected variant to be string of map, got %s", resultDetails.Variant)
-	}
-}
+				Ω(result).Should(Equal(openfeature.FloatResolutionDetail{
+					Value: defaultValue,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						ResolutionError: openfeature.NewFlagNotFoundResolutionError("Flag not found."),
+						Reason:          openfeature.DefaultReason,
+						Variant:         treatment,
+					},
+				}))
+			},
+			Entry("returns default value with empty treatment", ""),
+			Entry("returns default value with control treatment", "control"),
+		)
 
-func TestFloatFail(t *testing.T) {
-	// attempt to fetch an object treatment as a float. Should result in the default
-	ofClient := create(t)
-	flagName := "obj_feature"
-	evalCtx := evaluationContext()
+		It("returns default value and error if the treatment is not a float", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			splitResponse := uuid.NewString()
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(splitResponse)
+			const defaultValue = 8.2883
 
-	result, err := ofClient.FloatValue(nil, flagName, 10, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if result != float64(10) {
-		t.Errorf("Result was %f, but should have been default of 10", result)
-	}
+			// act
+			result := subject.FloatEvaluation(context.Background(), feature, defaultValue, evalCtx)
 
-	resultDetails, err := ofClient.FloatValueDetails(nil, flagName, 10, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if resultDetails.Value != float64(10) {
-		t.Errorf("Result was %f, but should have been default of 10", resultDetails.Value)
-	} else if resultDetails.ErrorCode != openfeature.ParseErrorCode {
-		t.Errorf("Expected parse error code, got %s", resultDetails.ErrorCode)
-	} else if resultDetails.Reason != openfeature.ErrorReason {
-		t.Errorf("Expected error reason code, got %s", resultDetails.Reason)
-	} else if resultDetails.Variant != "{\"key\": \"value\"}" {
-		t.Errorf("Expected variant to be string of map, got %s", resultDetails.Variant)
-	}
-}
+			Ω(result).Should(Equal(openfeature.FloatResolutionDetail{
+				Value: defaultValue,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					ResolutionError: openfeature.NewParseErrorResolutionError("Error parsing the treatment to the given type."),
+					Reason:          openfeature.ErrorReason,
+					Variant:         splitResponse,
+				},
+			}))
+		})
 
-func TestObjectFail(t *testing.T) {
-	// attempt to fetch an int as an object. Should result in the default
-	ofClient := create(t)
-	flagName := "int_feature"
-	evalCtx := evaluationContext()
-	defaultTreatment := map[string]interface{}{
-		"key": "value",
-	}
+		It("passes metadata to the split client", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			attributeValue := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+				"foo":                    attributeValue,
+			}
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, map[string]any{
+					"foo": attributeValue,
+				}).
+				Return("821.334")
 
-	result, err := ofClient.ObjectValue(nil, flagName, defaultTreatment, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if !reflect.DeepEqual(result, defaultTreatment) {
-		t.Error("Result was not default treatment")
-	}
+			// act
+			result := subject.FloatEvaluation(context.Background(), feature, 0, evalCtx)
 
-	resultDetails, err := ofClient.ObjectValueDetails(nil, flagName, defaultTreatment, evalCtx)
-	if err == nil {
-		t.Error("Expected exception to occur")
-	} else if !strings.Contains(err.Error(), string(openfeature.ParseErrorCode)) {
-		t.Errorf("Expected parse error, got %s", err.Error())
-	} else if !reflect.DeepEqual(resultDetails.Value, defaultTreatment) {
-		t.Errorf("Result was %f, but should have been default of 10", resultDetails.Value)
-	} else if resultDetails.ErrorCode != openfeature.ParseErrorCode {
-		t.Errorf("Expected parse error code, got %s", resultDetails.ErrorCode)
-	} else if resultDetails.Reason != openfeature.ErrorReason {
-		t.Errorf("Expected error reason code, got %s", resultDetails.Reason)
-	} else if resultDetails.Variant != "32" {
-		t.Errorf("Expected variant to be string of integer, got %s", resultDetails.Variant)
-	}
-}
+			Ω(result).Should(Equal(openfeature.FloatResolutionDetail{
+				Value: 821.334,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: "821.334",
+				},
+			}))
+		})
+	})
+
+	Describe("IntEvaluation", func() {
+		It("should return the default value and error if no targeting key", func() {
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				"foo": uuid.NewString(),
+			}
+			const defaultValue = int64(9)
+
+			// act
+			result := subject.IntEvaluation(context.Background(), feature, defaultValue, evalCtx)
+
+			Ω(result.Value).Should(Equal(defaultValue))
+			Ω(result.ProviderResolutionDetail).Should(Equal(openfeature.ProviderResolutionDetail{
+				ResolutionError: openfeature.NewTargetingKeyMissingResolutionError("Targeting key is required and missing."),
+				Reason:          openfeature.ErrorReason,
+				Variant:         "",
+			}))
+		})
+
+		It("split TARGETING_MATCH response", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			const expected = 2
+			treatment := fmt.Sprintf("%d", expected)
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(treatment)
+
+			// act
+			result := subject.IntEvaluation(context.Background(), feature, 0, evalCtx)
+
+			Ω(result).Should(Equal(openfeature.IntResolutionDetail{
+				Value: expected,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: treatment,
+				},
+			}))
+		})
+
+		DescribeTable("split CONTROL response",
+			func(treatment string) {
+				key := uuid.NewString()
+				feature := uuid.NewString()
+				evalCtx := openfeature.FlattenedContext{
+					openfeature.TargetingKey: key,
+				}
+				mockSplitClient.EXPECT().
+					Treatment(key, feature, nil).
+					Return(treatment)
+				const defaultValue = 5
+
+				// act
+				result := subject.IntEvaluation(context.Background(), feature, defaultValue, evalCtx)
+
+				Ω(result).Should(Equal(openfeature.IntResolutionDetail{
+					Value: defaultValue,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						ResolutionError: openfeature.NewFlagNotFoundResolutionError("Flag not found."),
+						Reason:          openfeature.DefaultReason,
+						Variant:         treatment,
+					},
+				}))
+			},
+			Entry("returns default value with empty treatment", ""),
+			Entry("returns default value with control treatment", "control"),
+		)
+
+		It("returns default value and error if the treatment is not a int", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			splitResponse := uuid.NewString()
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(splitResponse)
+			const defaultValue = int64(92)
+
+			// act
+			result := subject.IntEvaluation(context.Background(), feature, defaultValue, evalCtx)
+
+			Ω(result).Should(Equal(openfeature.IntResolutionDetail{
+				Value: defaultValue,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					ResolutionError: openfeature.NewParseErrorResolutionError("Error parsing the treatment to the given type."),
+					Reason:          openfeature.ErrorReason,
+					Variant:         splitResponse,
+				},
+			}))
+		})
+
+		It("passes metadata to the split client", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			attributeValue := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+				"foo":                    attributeValue,
+			}
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, map[string]any{
+					"foo": attributeValue,
+				}).
+				Return("9923")
+
+			// act
+			result := subject.IntEvaluation(context.Background(), feature, 0, evalCtx)
+
+			Ω(result).Should(Equal(openfeature.IntResolutionDetail{
+				Value: 9923,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: "9923",
+				},
+			}))
+		})
+	})
+
+	Describe("ObjectEvaluation", func() {
+		It("should return the default value and error if no targeting key", func() {
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				"foo": uuid.NewString(),
+			}
+			defaultValue := map[string]any{
+				"foo": uuid.NewString(),
+				"bar": 293.2,
+				"baz": true,
+			}
+
+			// act
+			result := subject.ObjectEvaluation(context.Background(), feature, defaultValue, evalCtx)
+
+			Ω(result.Value).Should(Equal(defaultValue))
+			Ω(result.ProviderResolutionDetail).Should(Equal(openfeature.ProviderResolutionDetail{
+				ResolutionError: openfeature.NewTargetingKeyMissingResolutionError("Targeting key is required and missing."),
+				Reason:          openfeature.ErrorReason,
+				Variant:         "",
+			}))
+		})
+
+		It("split TARGETING_MATCH response", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			fooValue := uuid.NewString()
+			barValue := 123.456
+			treatment := fmt.Sprintf(`{"foo":"%s","bar":%f,"baz":%t}`,
+				fooValue, barValue, true)
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(treatment)
+
+			// act
+			result := subject.ObjectEvaluation(context.Background(), feature, nil, evalCtx)
+
+			Ω(result).Should(Equal(openfeature.InterfaceResolutionDetail{
+				Value: map[string]any{
+					"foo": fooValue,
+					"bar": barValue,
+					"baz": true,
+				},
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: treatment,
+				},
+			}))
+		})
+
+		DescribeTable("split CONTROL response",
+			func(treatment string) {
+				key := uuid.NewString()
+				feature := uuid.NewString()
+				evalCtx := openfeature.FlattenedContext{
+					openfeature.TargetingKey: key,
+				}
+				mockSplitClient.EXPECT().
+					Treatment(key, feature, nil).
+					Return(treatment)
+				defaultValue := map[string]any{
+					"foo": uuid.NewString(),
+					"bar": 1979,
+					"baz": true,
+				}
+
+				// act
+				result := subject.ObjectEvaluation(context.Background(), feature, defaultValue, evalCtx)
+
+				Ω(result).Should(Equal(openfeature.InterfaceResolutionDetail{
+					Value: defaultValue,
+					ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+						ResolutionError: openfeature.NewFlagNotFoundResolutionError("Flag not found."),
+						Reason:          openfeature.DefaultReason,
+						Variant:         treatment,
+					},
+				}))
+			},
+			Entry("returns default value with empty treatment", ""),
+			Entry("returns default value with control treatment", "control"),
+		)
+
+		It("returns default value and error if the treatment is not json", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+			}
+			treatment := uuid.NewString()
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, nil).
+				Return(treatment)
+			defaultValue := map[string]any{
+				"foo": uuid.NewString(),
+				"bar": 1979,
+				"baz": true,
+			}
+
+			// act
+			result := subject.ObjectEvaluation(context.Background(), feature, defaultValue, evalCtx)
+
+			Ω(result).Should(Equal(openfeature.InterfaceResolutionDetail{
+				Value: defaultValue,
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					ResolutionError: openfeature.NewParseErrorResolutionError("Error parsing the treatment to the given type."),
+					Reason:          openfeature.ErrorReason,
+					Variant:         treatment,
+				},
+			}))
+		})
+
+		It("passes metadata to the split client", func() {
+			key := uuid.NewString()
+			feature := uuid.NewString()
+			attributeValue := uuid.NewString()
+			evalCtx := openfeature.FlattenedContext{
+				openfeature.TargetingKey: key,
+				"foo":                    attributeValue,
+			}
+			mockSplitClient.EXPECT().
+				Treatment(key, feature, map[string]any{
+					"foo": attributeValue,
+				}).
+				Return(`{"foo":"bar","baz":true}`)
+
+			// act
+			result := subject.ObjectEvaluation(context.Background(), feature, nil, evalCtx)
+
+			Ω(result).Should(Equal(openfeature.InterfaceResolutionDetail{
+				Value: map[string]any{
+					"foo": "bar",
+					"baz": true,
+				},
+				ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
+					Reason:  openfeature.TargetingMatchReason,
+					Variant: `{"foo":"bar","baz":true}`,
+				},
+			}))
+		})
+	})
+
+	Describe("NewProviderSimple", Ordered, func() {
+		It("successfully creates a new provider", func() {
+			Ω(NewProviderSimple("localhost")).ShouldNot(BeNil())
+		})
+
+		It("fails with empty api key", func() {
+			_, err := NewProviderSimple("")
+			Ω(err).Should(HaveOccurred())
+		})
+	})
+})
