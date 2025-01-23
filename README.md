@@ -61,7 +61,7 @@ One important note is that the Split Provider **requires a targeting key** to be
 client := openfeature.NewClient("CLIENT_NAME");
 
 evaluationContext := openfeature.NewEvaluationContext("TARGETING_KEY", nil)
-boolValue := client.BooleanValue(nil, "boolFlag", false, evaluationContext)
+boolValue := client.BooleanValue(context.Background(), "boolFlag", false, evaluationContext)
 ```
 If the same targeting key is used repeatedly, the evaluation context may be set at the client level 
 ```go

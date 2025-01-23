@@ -6,15 +6,17 @@ import (
 	"github.com/splitio/go-client/splitio/conf"
 	"strconv"
 
-	"github.com/open-feature/go-sdk/pkg/openfeature"
+	"github.com/open-feature/go-sdk/openfeature"
 	"github.com/splitio/go-client/splitio/client"
 )
 
 type SplitProvider struct {
-	client client.SplitClient
+	client ISplitClient
 }
 
-func NewProvider(splitClient client.SplitClient) (*SplitProvider, error) {
+var _ openfeature.FeatureProvider = &SplitProvider{}
+
+func NewProvider(splitClient ISplitClient) (*SplitProvider, error) {
 	return &SplitProvider{
 		client: splitClient,
 	}, nil
@@ -31,7 +33,7 @@ func NewProviderSimple(apiKey string) (*SplitProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewProvider(*splitClient)
+	return NewProvider(splitClient)
 }
 
 func (provider *SplitProvider) Metadata() openfeature.Metadata {
@@ -40,7 +42,7 @@ func (provider *SplitProvider) Metadata() openfeature.Metadata {
 	}
 }
 
-func (provider *SplitProvider) BooleanEvaluation(ctx context.Context, flag string, defaultValue bool, evalCtx openfeature.FlattenedContext) openfeature.BoolResolutionDetail {
+func (provider *SplitProvider) BooleanEvaluation(_ context.Context, flag string, defaultValue bool, evalCtx openfeature.FlattenedContext) openfeature.BoolResolutionDetail {
 	if noTargetingKey(evalCtx) {
 		return openfeature.BoolResolutionDetail{
 			Value:                    defaultValue,
@@ -71,7 +73,7 @@ func (provider *SplitProvider) BooleanEvaluation(ctx context.Context, flag strin
 	}
 }
 
-func (provider *SplitProvider) StringEvaluation(ctx context.Context, flag string, defaultValue string, evalCtx openfeature.FlattenedContext) openfeature.StringResolutionDetail {
+func (provider *SplitProvider) StringEvaluation(_ context.Context, flag string, defaultValue string, evalCtx openfeature.FlattenedContext) openfeature.StringResolutionDetail {
 	if noTargetingKey(evalCtx) {
 		return openfeature.StringResolutionDetail{
 			Value:                    defaultValue,
@@ -91,7 +93,7 @@ func (provider *SplitProvider) StringEvaluation(ctx context.Context, flag string
 	}
 }
 
-func (provider *SplitProvider) FloatEvaluation(ctx context.Context, flag string, defaultValue float64, evalCtx openfeature.FlattenedContext) openfeature.FloatResolutionDetail {
+func (provider *SplitProvider) FloatEvaluation(_ context.Context, flag string, defaultValue float64, evalCtx openfeature.FlattenedContext) openfeature.FloatResolutionDetail {
 	if noTargetingKey(evalCtx) {
 		return openfeature.FloatResolutionDetail{
 			Value:                    defaultValue,
@@ -118,7 +120,7 @@ func (provider *SplitProvider) FloatEvaluation(ctx context.Context, flag string,
 	}
 }
 
-func (provider *SplitProvider) IntEvaluation(ctx context.Context, flag string, defaultValue int64, evalCtx openfeature.FlattenedContext) openfeature.IntResolutionDetail {
+func (provider *SplitProvider) IntEvaluation(_ context.Context, flag string, defaultValue int64, evalCtx openfeature.FlattenedContext) openfeature.IntResolutionDetail {
 	if noTargetingKey(evalCtx) {
 		return openfeature.IntResolutionDetail{
 			Value:                    defaultValue,
@@ -145,7 +147,7 @@ func (provider *SplitProvider) IntEvaluation(ctx context.Context, flag string, d
 	}
 }
 
-func (provider *SplitProvider) ObjectEvaluation(ctx context.Context, flag string, defaultValue interface{}, evalCtx openfeature.FlattenedContext) openfeature.InterfaceResolutionDetail {
+func (provider *SplitProvider) ObjectEvaluation(_ context.Context, flag string, defaultValue interface{}, evalCtx openfeature.FlattenedContext) openfeature.InterfaceResolutionDetail {
 	if noTargetingKey(evalCtx) {
 		return openfeature.InterfaceResolutionDetail{
 			Value:                    defaultValue,
@@ -182,7 +184,21 @@ func (provider *SplitProvider) Hooks() []openfeature.Hook {
 // *** Helpers ***
 
 func (provider *SplitProvider) evaluateTreatment(flag string, evalContext openfeature.FlattenedContext) string {
-	return provider.client.Treatment(evalContext[openfeature.TargetingKey], flag, nil)
+	var (
+		targetKey  any
+		attributes = map[string]any{}
+	)
+	for key, value := range evalContext {
+		if key == openfeature.TargetingKey {
+			targetKey = value
+		} else {
+			attributes[key] = value
+		}
+	}
+	if len(attributes) == 0 {
+		attributes = nil
+	}
+	return provider.client.Treatment(targetKey, flag, attributes)
 }
 
 func noTargetingKey(evalContext openfeature.FlattenedContext) bool {
