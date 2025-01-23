@@ -1,4 +1,4 @@
-package split_openfeature_provider_go_test
+package fork_split_openfeature_provider_go_test
 
 import (
 	"testing"

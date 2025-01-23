@@ -1,4 +1,4 @@
-package split_openfeature_provider_go_test
+package fork_split_openfeature_provider_go_test
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/open-feature/go-sdk/openfeature"
-	. "github.com/splitio/split-openfeature-provider-go"
-	"github.com/splitio/split-openfeature-provider-go/mocks"
+	. "github.com/snap-one/fork-split-openfeature-provider-go"
+	"github.com/snap-one/fork-split-openfeature-provider-go/mocks"
 	"go.uber.org/mock/gomock"
 )
 
